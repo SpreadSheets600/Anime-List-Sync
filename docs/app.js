@@ -18,6 +18,7 @@
     element.addEventListener("input", () => {
       storage.setItem(storageKey, element.value.trim());
       updateMalCommand();
+      updateAnimeScheduleCommand();
     });
   }
 
@@ -104,6 +105,119 @@
     render();
   }
 
+  async function fetchJson(url, options) {
+    const response = await window.fetch(url, options);
+    const text = await response.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (error) {
+      data = text;
+    }
+    return { response, data };
+  }
+
+  async function runAniListLiveCheck() {
+    const output = byId("anilist-verify-output");
+    const token = byId("anilist-verify-input").value.trim();
+    output.value = "Running AniList live check...";
+    if (!token) {
+      output.value = "Paste an AniList token first.";
+      return;
+    }
+
+    try {
+      const { response, data } = await fetchJson("https://graphql.anilist.co", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ query: "query { Viewer { id name } }" }),
+      });
+
+      if (!response.ok || data?.errors) {
+        output.value = `AniList live check failed.\nHTTP: ${response.status}\nResponse: ${JSON.stringify(data, null, 2)}`;
+        return;
+      }
+
+      output.value = `AniList token is valid.\nViewer: ${data.data.Viewer.name}\nViewer ID: ${data.data.Viewer.id}`;
+    } catch (error) {
+      output.value = `AniList live check failed before API validation.\n${String(error)}`;
+    }
+  }
+
+  async function runMalLiveCheck() {
+    const output = byId("mal-verify-output");
+    const value = byId("mal-verify-input").value.trim();
+    output.value = "Running MAL live check...";
+    if (!value) {
+      output.value = "Paste a MAL value first.";
+      return;
+    }
+    if (value.startsWith("def") || value.includes("code=") || value.includes("&state=")) {
+      output.value =
+        "This looks like a MAL authorization code, not an access token. Exchange it locally first, then live-check the resulting access token.";
+      return;
+    }
+
+    try {
+      const { response, data } = await fetchJson(
+        "https://api.myanimelist.net/v2/users/@me?fields=id,name,picture",
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${value}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        output.value = `MAL live check failed.\nHTTP: ${response.status}\nResponse: ${typeof data === "string" ? data : JSON.stringify(data, null, 2)}\n\nIf this value is a refresh token, that is expected. Public browser validation only works for MAL access tokens.`;
+        return;
+      }
+
+      output.value = `MAL access token is valid.\nUser: ${data.name}\nUser ID: ${data.id}\n\nIf you need MAL_REFRESH_TOKEN, this live check does not verify it. Refresh tokens must be exchanged server-side or locally with your client secret.`;
+    } catch (error) {
+      output.value = `MAL live check failed before API validation.\n${String(error)}\n\nThis can also happen if the browser blocks the cross-origin request.`;
+    }
+  }
+
+  async function runAnimeScheduleLiveCheck() {
+    const output = byId("animeschedule-verify-output");
+    const token = byId("animeschedule-verify-input").value.trim();
+    output.value = "Running AnimeSchedule live check...";
+    if (!token) {
+      output.value = "Paste an AnimeSchedule token first.";
+      return;
+    }
+
+    try {
+      const { response, data } = await fetchJson(
+        "https://animeschedule.net/api/v3/animelists/oauth",
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      if (!response.ok) {
+        output.value = `AnimeSchedule live check failed.\nHTTP: ${response.status}\nResponse: ${typeof data === "string" ? data : JSON.stringify(data, null, 2)}\n\nThis check uses the OAuth anime-list endpoint. A plain application token will fail here even if it is otherwise valid, because the sync needs an OAuth2 user token.`;
+        return;
+      }
+
+      const count = Array.isArray(data?.anime) ? data.anime.length : "unknown";
+      output.value = `AnimeSchedule OAuth token is valid for sync.\nList entries returned: ${count}`;
+    } catch (error) {
+      output.value = `AnimeSchedule live check failed before API validation.\n${String(error)}\n\nThis can also happen if the browser blocks the cross-origin request.`;
+    }
+  }
+
   function buildUrl(base, params) {
     const url = new URL(base);
     Object.entries(params).forEach(([key, value]) => {
@@ -112,6 +226,55 @@
       }
     });
     return url.toString();
+  }
+
+  function generateAnimeScheduleUrl() {
+    const clientId = byId("animeschedule-client-id").value.trim();
+    const redirectUri = byId("animeschedule-redirect-uri").value.trim();
+    const scope = byId("animeschedule-scope").value.trim();
+    const codeVerifier = randomString(96);
+    const state = randomString(32);
+
+    storage.setItem(
+      "anime-sync:animeschedule-code-verifier-generated",
+      codeVerifier
+    );
+    storage.setItem("anime-sync:animeschedule-state-generated", state);
+
+    const url = buildUrl("https://animeschedule.net/api/v3/oauth2/authorize", {
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      code_challenge: codeVerifier,
+      code_challenge_method: "plain",
+      state,
+      scope,
+    });
+
+    setValue("animeschedule-code-verifier", codeVerifier);
+    setValue("animeschedule-state", state);
+    setValue("animeschedule-url", url);
+    updateAnimeScheduleCommand();
+  }
+
+  function updateAnimeScheduleCommand() {
+    const clientId = byId("animeschedule-client-id").value.trim();
+    const redirectUri = byId("animeschedule-redirect-uri").value.trim();
+    const code = byId("animeschedule-code").value.trim();
+    const codeVerifier =
+      byId("animeschedule-code-verifier").value.trim() ||
+      storage.getItem("anime-sync:animeschedule-code-verifier-generated") ||
+      "";
+
+    const command = [
+      'python3 scripts/animeschedule_oauth.py exchange',
+      `--client-id "${clientId || "YOUR_APPLICATION_ID"}"`,
+      `--redirect-uri "${redirectUri || "YOUR_REDIRECT_URI"}"`,
+      `--code "${code || "PASTE_CODE_HERE"}"`,
+      `--code-verifier "${codeVerifier || "PASTE_CODE_VERIFIER_HERE"}"`,
+    ].join(" \\\n  ");
+
+    setValue("animeschedule-command", command);
   }
 
   function parseCallback() {
@@ -137,6 +300,7 @@
       details.push(`MAL code: ${malCode}`);
       details.push("MAL refresh token: not present in callback URL");
       setValue("mal-code", malCode);
+      setValue("animeschedule-code", malCode);
     }
     if (queryState) {
       details.push(`Query state: ${queryState}`);
@@ -164,6 +328,7 @@
     );
 
     updateMalCommand();
+    updateAnimeScheduleCommand();
   }
 
   function generateAniListUrl() {
@@ -225,6 +390,9 @@
   ["anilist-client-id", "anilist-redirect-uri", "mal-client-id", "mal-redirect-uri"].forEach(
     saveField
   );
+  ["animeschedule-client-id", "animeschedule-redirect-uri", "animeschedule-scope"].forEach(
+    saveField
+  );
 
   const storedVerifier = storage.getItem("anime-sync:mal-code-verifier-generated");
   if (storedVerifier) {
@@ -236,8 +404,32 @@
     setValue("mal-state", storedState);
   }
 
+  const storedAnimeScheduleVerifier = storage.getItem(
+    "anime-sync:animeschedule-code-verifier-generated"
+  );
+  if (storedAnimeScheduleVerifier) {
+    setValue("animeschedule-code-verifier", storedAnimeScheduleVerifier);
+  }
+
+  const storedAnimeScheduleState = storage.getItem(
+    "anime-sync:animeschedule-state-generated"
+  );
+  if (storedAnimeScheduleState) {
+    setValue("animeschedule-state", storedAnimeScheduleState);
+  }
+
   byId("anilist-generate").addEventListener("click", generateAniListUrl);
   byId("mal-generate").addEventListener("click", generateMalUrl);
+  byId("animeschedule-generate").addEventListener(
+    "click",
+    generateAnimeScheduleUrl
+  );
+  byId("anilist-live-check").addEventListener("click", runAniListLiveCheck);
+  byId("mal-live-check").addEventListener("click", runMalLiveCheck);
+  byId("animeschedule-live-check").addEventListener(
+    "click",
+    runAnimeScheduleLiveCheck
+  );
 
   attachVerifier("anilist-verify-input", "anilist-verify-output", verifyAniListValue);
   attachVerifier("mal-verify-input", "mal-verify-output", verifyMalValue);
@@ -248,4 +440,5 @@
   );
 
   parseCallback();
+  updateAnimeScheduleCommand();
 })();
