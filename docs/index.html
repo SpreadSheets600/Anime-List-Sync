@@ -11,7 +11,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="./styles.css" />
@@ -51,7 +51,8 @@
           <p class="helper">
             AniList implicit flow usually returns an access token in the URL
             fragment. MAL authorization code flow returns a <code>code</code> in
-            the query string.
+            the query string, which must be exchanged before you get a refresh
+            token.
           </p>
         </section>
 
@@ -85,6 +86,15 @@
               Recommended output for GitHub secret:
               <code>ANILIST_TOKEN</code>
             </p>
+            <div class="verify-block">
+              <p class="field-label">Verify AniList token format</p>
+              <textarea
+                id="anilist-verify-input"
+                class="mono"
+                placeholder="Paste your AniList access token"
+              ></textarea>
+              <textarea id="anilist-verify-output" class="mono" readonly></textarea>
+            </div>
           </section>
 
           <section class="panel">
@@ -120,6 +130,10 @@
               <span>Returned authorization code</span>
               <textarea id="mal-code" class="mono" readonly></textarea>
             </label>
+            <p class="helper">
+              This value is not the refresh token. It is only the temporary
+              authorization code from the redirect URL.
+            </p>
             <label>
               <span>Local exchange command</span>
               <textarea id="mal-command" class="mono" readonly></textarea>
@@ -128,6 +142,15 @@
               Run the generated command locally. Do not embed your MAL client
               secret in a public site.
             </p>
+            <div class="verify-block">
+              <p class="field-label">Verify MAL value type</p>
+              <textarea
+                id="mal-verify-input"
+                class="mono"
+                placeholder="Paste a MAL code, access token, or refresh token"
+              ></textarea>
+              <textarea id="mal-verify-output" class="mono" readonly></textarea>
+            </div>
           </section>
         </section>
 
@@ -151,6 +174,15 @@
               rel="noreferrer"
               >Open AnimeSchedule docs</a
             >
+            <div class="verify-block">
+              <p class="field-label">Verify AnimeSchedule token format</p>
+              <textarea
+                id="animeschedule-verify-input"
+                class="mono"
+                placeholder="Paste your AnimeSchedule bearer token"
+              ></textarea>
+              <textarea id="animeschedule-verify-output" class="mono" readonly></textarea>
+            </div>
           </section>
 
           <section class="panel">

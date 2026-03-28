@@ -1,12 +1,14 @@
 :root {
-  --bg: #f3eee5;
-  --paper: rgba(255, 250, 244, 0.78);
-  --ink: #181512;
-  --muted: #675d54;
-  --line: rgba(24, 21, 18, 0.12);
-  --accent: #b84e2d;
-  --accent-soft: rgba(184, 78, 45, 0.12);
-  --shadow: 0 30px 80px rgba(52, 32, 21, 0.12);
+  --bg: #07090d;
+  --paper: rgba(13, 17, 24, 0.82);
+  --paper-strong: rgba(17, 23, 31, 0.94);
+  --ink: #ecf3ff;
+  --muted: #91a0b7;
+  --line: rgba(154, 177, 214, 0.16);
+  --accent: #7ae0ff;
+  --accent-strong: #4cc7ff;
+  --accent-soft: rgba(76, 199, 255, 0.12);
+  --shadow: 0 30px 80px rgba(0, 0, 0, 0.42);
 }
 
 * {
@@ -20,12 +22,12 @@ body {
 }
 
 body {
-  font-family: "IBM Plex Sans", sans-serif;
+  font-family: "JetBrains Mono", monospace;
   color: var(--ink);
   background:
-    radial-gradient(circle at top left, rgba(184, 78, 45, 0.18), transparent 28%),
-    radial-gradient(circle at 85% 20%, rgba(116, 68, 42, 0.12), transparent 25%),
-    linear-gradient(180deg, #f7f1e8 0%, #efe7dd 100%);
+    radial-gradient(circle at top left, rgba(76, 199, 255, 0.2), transparent 24%),
+    radial-gradient(circle at 85% 12%, rgba(126, 104, 255, 0.14), transparent 28%),
+    linear-gradient(180deg, #09111a 0%, #05070b 100%);
 }
 
 .page-shell {
@@ -40,8 +42,8 @@ body {
   border: 1px solid var(--line);
   border-radius: 30px;
   background:
-    linear-gradient(135deg, rgba(255, 250, 244, 0.94), rgba(245, 232, 220, 0.82)),
-    #fff8f1;
+    linear-gradient(135deg, rgba(14, 20, 29, 0.98), rgba(9, 14, 21, 0.88)),
+    var(--paper-strong);
   box-shadow: var(--shadow);
   overflow: hidden;
 }
@@ -53,7 +55,7 @@ body {
   width: 320px;
   height: 320px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(184, 78, 45, 0.18), transparent 65%);
+  background: radial-gradient(circle, rgba(76, 199, 255, 0.22), transparent 65%);
 }
 
 .eyebrow,
@@ -68,8 +70,8 @@ body {
 
 .hero h1,
 .panel h2 {
-  font-family: "Space Grotesk", sans-serif;
-  letter-spacing: -0.04em;
+  font-family: "JetBrains Mono", monospace;
+  letter-spacing: -0.05em;
 }
 
 .hero h1 {
@@ -116,7 +118,7 @@ main {
   border-radius: 24px;
   background: var(--paper);
   backdrop-filter: blur(10px);
-  box-shadow: 0 18px 40px rgba(52, 32, 21, 0.06);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24);
 }
 
 .panel h2 {
@@ -157,9 +159,9 @@ button {
 input,
 textarea {
   width: 100%;
-  border: 1px solid rgba(24, 21, 18, 0.16);
+  border: 1px solid rgba(154, 177, 214, 0.18);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.68);
+  background: rgba(4, 9, 14, 0.82);
   color: var(--ink);
 }
 
@@ -175,9 +177,7 @@ textarea {
 }
 
 .mono {
-  font-family:
-    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
-    monospace;
+  font-family: "JetBrains Mono", monospace;
   font-size: 0.88rem;
 }
 
@@ -187,8 +187,8 @@ button {
   padding: 0 18px;
   border: 0;
   border-radius: 999px;
-  background: var(--ink);
-  color: #fff9f1;
+  background: linear-gradient(135deg, var(--accent-strong), var(--accent));
+  color: #031019;
   font-weight: 600;
   cursor: pointer;
   transition:
@@ -199,14 +199,20 @@ button {
 
 button:hover {
   transform: translateY(-1px);
-  background: #2b241f;
-  box-shadow: 0 12px 30px rgba(24, 21, 18, 0.16);
+  background: linear-gradient(135deg, #91ecff, #5fd2ff);
+  box-shadow: 0 12px 30px rgba(76, 199, 255, 0.22);
 }
 
 .helper {
   margin: 14px 0 0;
   color: var(--muted);
   line-height: 1.5;
+}
+
+.verify-block {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
 }
 
 .steps {
@@ -225,6 +231,13 @@ button:hover {
 
 .text-link:hover {
   text-decoration: underline;
+}
+
+code {
+  padding: 0.12rem 0.36rem;
+  border: 1px solid rgba(154, 177, 214, 0.14);
+  border-radius: 0.45rem;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 @media (max-width: 860px) {

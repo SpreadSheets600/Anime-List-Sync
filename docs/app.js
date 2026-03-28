@@ -40,6 +40,70 @@
     }
   }
 
+  function verifyAniListValue(value) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Paste an AniList token to inspect it.";
+    }
+    if (trimmed.includes("&state=") || trimmed.includes("?code=")) {
+      return "This looks like a redirect URL fragment or query string, not a plain AniList token.";
+    }
+    if (trimmed.length < 20) {
+      return "Too short to be a realistic AniList bearer token.";
+    }
+    if (/^[A-Za-z0-9._~-]+$/.test(trimmed)) {
+      return "Looks plausible for ANILIST_TOKEN. Browser-only format check passed.";
+    }
+    return "Contains unexpected characters for a plain bearer token.";
+  }
+
+  function verifyMalValue(value) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Paste a MAL value to inspect it.";
+    }
+    if (trimmed.startsWith("def")) {
+      return "Looks like a MAL authorization code, not a refresh token. Exchange it first.";
+    }
+    if (trimmed.includes("&state=") || trimmed.includes("code=")) {
+      return "This looks like the callback payload. Extract the code first.";
+    }
+    if (trimmed.length < 20) {
+      return "Too short to be a realistic MAL token or code.";
+    }
+    if (/^[A-Za-z0-9._~-]+$/.test(trimmed)) {
+      return "Looks like a token-shaped MAL value. It could be an access token or refresh token, but format alone cannot prove which one.";
+    }
+    return "Contains unexpected characters for a plain MAL token/code value.";
+  }
+
+  function verifyAnimeScheduleValue(value) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "Paste an AnimeSchedule token to inspect it.";
+    }
+    if (trimmed.length < 20) {
+      return "Too short to be a realistic AnimeSchedule bearer token.";
+    }
+    if (/^[A-Za-z0-9._~-]+$/.test(trimmed)) {
+      return "Looks plausible for ANIMESCHEDULE_TOKEN. A live API check is still required to prove it is valid.";
+    }
+    return "Contains unexpected characters for a plain bearer token.";
+  }
+
+  function attachVerifier(inputId, outputId, verifyFn) {
+    const input = byId(inputId);
+    const output = byId(outputId);
+    if (!input || !output) {
+      return;
+    }
+    const render = () => {
+      output.value = verifyFn(input.value);
+    };
+    input.addEventListener("input", render);
+    render();
+  }
+
   function buildUrl(base, params) {
     const url = new URL(base);
     Object.entries(params).forEach(([key, value]) => {
@@ -71,6 +135,7 @@
 
     if (malCode) {
       details.push(`MAL code: ${malCode}`);
+      details.push("MAL refresh token: not present in callback URL");
       setValue("mal-code", malCode);
     }
     if (queryState) {
@@ -173,6 +238,14 @@
 
   byId("anilist-generate").addEventListener("click", generateAniListUrl);
   byId("mal-generate").addEventListener("click", generateMalUrl);
+
+  attachVerifier("anilist-verify-input", "anilist-verify-output", verifyAniListValue);
+  attachVerifier("mal-verify-input", "mal-verify-output", verifyMalValue);
+  attachVerifier(
+    "animeschedule-verify-input",
+    "animeschedule-verify-output",
+    verifyAnimeScheduleValue
+  );
 
   parseCallback();
 })();
