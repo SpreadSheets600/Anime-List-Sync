@@ -11,6 +11,11 @@ ANILIST_API = "https://graphql.anilist.co"
 MAL_API = "https://api.myanimelist.net/v2"
 MAL_OAUTH = "https://myanimelist.net/v1/oauth2/token"
 ANIMESCHEDULE_API = "https://animeschedule.net/api/v3"
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
+    "AnimeListSync/1.0"
+)
 
 
 ANILIST_VIEWER_QUERY = """
@@ -131,7 +136,12 @@ def http_json(
     payload: dict[str, Any] | None = None,
     form: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    request_headers = {"Accept": "application/json", **(headers or {})}
+    request_headers = {
+        "Accept": "application/json",
+        "User-Agent": os.getenv("HTTP_USER_AGENT", DEFAULT_USER_AGENT),
+        "Accept-Language": "en-US,en;q=0.9",
+        **(headers or {}),
+    }
 
     body: bytes | None = None
     if payload is not None:
@@ -164,7 +174,12 @@ def http_no_content(
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    request_headers = {"Accept": "application/json", **(headers or {})}
+    request_headers = {
+        "Accept": "application/json",
+        "User-Agent": os.getenv("HTTP_USER_AGENT", DEFAULT_USER_AGENT),
+        "Accept-Language": "en-US,en;q=0.9",
+        **(headers or {}),
+    }
     body: bytes | None = None
     if payload is not None:
         body = json.dumps(payload).encode("utf-8")
