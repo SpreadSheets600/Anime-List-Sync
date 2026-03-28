@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.env
+.env.*
+dist/
+config/providers.json
+config/mappings.json
+status/latest.json
+status/mappings.json
+src/*.egg-info/
