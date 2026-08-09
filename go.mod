@@ -1,4 +1,4 @@
-module github.com/bigspawn/anilist-mal-sync
+module github.com/SpreadSheets600/Anime-List-Sync
 
 go 1.25
 
