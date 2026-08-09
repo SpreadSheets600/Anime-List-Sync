@@ -1,6 +1,9 @@
-# anilist-mal-sync [![Build Status](https://github.com/bigspawn/anilist-mal-sync/workflows/go/badge.svg)](https://github.com/bigspawn/anilist-mal-sync/actions) [![codecov](https://codecov.io/gh/bigspawn/anilist-mal-sync/branch/main/graph/badge.svg)](https://codecov.io/gh/bigspawn/anilist-mal-sync)
+# Anime List Sync [![Build Status](https://github.com/SpreadSheets600/Anime-List-Sync/workflows/go/badge.svg)](https://github.com/SpreadSheets600/Anime-List-Sync/actions)
 
-> **Note:** This project is under development. Feedback, suggestions, and issues are highly appreciated!
+> **Note:** This is a personal template repo forked from
+> [bigspawn/anilist-mal-sync](https://github.com/bigspawn/anilist-mal-sync). It is wired for
+> zero-setup daily syncs via GitHub Actions; local usage (Docker / binary) works the same as
+> upstream.
 
 Program to synchronize your AniList and MyAnimeList accounts.
 
@@ -68,7 +71,7 @@ Edit `docker-compose.yaml` with your credentials:
 ```yaml
 services:
   sync:
-    image: ghcr.io/bigspawn/anilist-mal-sync:latest
+    build: .
     command: ["watch", "--once"]
     ports:
       - "18080:18080"
@@ -579,15 +582,15 @@ For detailed documentation, see [docs/favorites-sync.md](docs/favorites-sync.md)
 
 Requires **Go 1.25+** ([download](https://go.dev/dl/)).
 
-**Option A — install from registry:**
+**Option A — install from registry (requires a tagged release):**
 ```bash
-go install github.com/bigspawn/anilist-mal-sync@latest
+go install github.com/SpreadSheets600/Anime-List-Sync@latest
 ```
 
 **Option B — clone and build locally:**
 ```bash
-git clone https://github.com/bigspawn/anilist-mal-sync.git
-cd anilist-mal-sync
+git clone https://github.com/SpreadSheets600/Anime-List-Sync.git
+cd Anime-List-Sync
 go build -o anilist-mal-sync .
 ```
 
@@ -618,11 +621,12 @@ See [Quick Start](#quick-start-docker) for the recommended setup.
 **Using config file instead of environment variables:**
 
 ```bash
+docker build -t anilist-mal-sync .
 docker run --rm -p 18080:18080 \
   -e PUID=$(id -u) -e PGID=$(id -g) \
   -v $(pwd)/config.yaml:/etc/anilist-mal-sync/config.yaml:ro \
   -v $(pwd)/tokens:/home/appuser/.config/anilist-mal-sync \
-  ghcr.io/bigspawn/anilist-mal-sync:latest -c /etc/anilist-mal-sync/config.yaml sync
+  anilist-mal-sync -c /etc/anilist-mal-sync/config.yaml sync
 ```
 
 ### Watch mode
