@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anime List Sync - Back from authorization</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <main>
+    <h1>Anime List Sync - authorization result</h1>
+    <p><a href="index.html">&larr; back to setup</a></p>
+
+    <div class="panel" id="anilist-progress" hidden>
+      <p class="muted">Exchanging code for a token with AniList&hellip;</p>
+    </div>
+
+    <div class="panel" id="anilist-result" hidden>
+      <h2>AniList token</h2>
+      <p class="success" id="anilist-username-ok" hidden>
+        You are logged in as <b id="anilist-username"></b> - use that as ANILIST_USERNAME.
+      </p>
+      <p class="muted">Copy the token and add it to the repository secret <code>ANILIST_TOKEN</code>:</p>
+      <div class="token-box" id="anilist-token"></div>
+      <button id="anilist-copy">Copy token</button>
+    </div>
+    <p class="error" id="anilist-error" hidden></p>
+
+    <div class="panel" id="mal-steps" hidden>
+      <h2>MyAnimeList - finish in GitHub Actions</h2>
+      <p class="muted">Copy the code and the verifier below, then run the
+        <code>Get MyAnimeList token</code> workflow in your repository
+        (<b>Actions &gt; Get MyAnimeList token &gt; Run workflow</b>) and paste them in:</p>
+      <p class="muted">Authorization code (single-use):</p>
+      <div class="token-box" id="mal-code"></div>
+      <button id="mal-code-copy">Copy code</button>
+      <p class="muted" style="margin-top: 14px">PKCE verifier:</p>
+      <div class="token-box" id="mal-verifier"></div>
+      <button id="mal-verifier-copy">Copy verifier</button>
+      <p class="muted" style="margin-top: 14px">
+        When the workflow finishes, copy the <code>access token</code> from its log into the
+        repository secret <code>MAL_TOKEN</code>.
+      </p>
+    </div>
+    <p class="error" id="mal-error" hidden></p>
+  </main>
+
+  <script src="assets/site.js"></script>
+  <script>
+    window.AnimeListSyncSite.init();
+  </script>
+</body>
+</html>

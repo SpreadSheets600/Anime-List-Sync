@@ -1,0 +1,19 @@
+bin/
+anilist-mal-sync
+
+.env
+.token
+.token*
+.claude
+
+docker-compose.yaml
+config.yaml
+CLAUDE.md
+TASK.md
+
+*tmp.json
+*.log
+*.out
+
+# Legacy Python project kept for reference, not tracked
+archive/

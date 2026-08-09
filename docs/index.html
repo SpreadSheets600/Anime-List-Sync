@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anime List Sync - Setup</title>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <main>
+    <h1>Anime List Sync setup</h1>
+    <p>
+      This site issues the access tokens your daily sync workflow needs.
+      Tokens are exchanged in your browser (or in a one-time GitHub Actions run)
+      and are never stored here. Copy them into repository secrets afterwards.
+    </p>
+
+    <div class="panel">
+      <h2>Step 1 - Create the OAuth apps</h2>
+      <p class="step"><b>AniList:</b> open <a href="https://anilist.co/settings/developer">anilist.co/settings/developer</a>,
+        create a client, and set the redirect URL to exactly:</p>
+      <div class="redirect-uri" data-redirect-uri></div>
+      <p class="step"><b>MyAnimeList:</b> open <a href="https://myanimelist.net/apiconfig">myanimelist.net/apiconfig</a>,
+        create a client, and set the redirect URL to the same address above.</p>
+    </div>
+
+    <div class="panel" id="anilist-panel">
+      <h2>Step 2 - AniList token</h2>
+      <label class="muted" for="anilist-client-id">AniList client ID</label>
+      <input type="text" id="anilist-client-id" placeholder="e.g. 12345"
+             autocomplete="off" spellcheck="false">
+      <div>
+        <button id="anilist-start">Authorize with AniList</button>
+      </div>
+      <p class="muted">You will be redirected to AniList and back. Your token is then shown here for you to copy.</p>
+    </div>
+
+    <div class="panel" id="mal-panel">
+      <h2>Step 3 - MyAnimeList token</h2>
+      <label class="muted" for="mal-client-id">MyAnimeList client ID</label>
+      <input type="text" id="mal-client-id" placeholder="e.g. 1234567890abcdef"
+             autocomplete="off" spellcheck="false">
+      <div>
+        <button id="mal-start">Authorize with MyAnimeList</button>
+      </div>
+      <p class="muted">
+        MyAnimeList blocks browser token exchanges, so after authorizing you will get
+        a <b>one-time code</b> instead. You then run the <code>Get MyAnimeList token</code>
+        workflow once and copy its output here - it takes under a minute.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h2>Step 4 - Store the secrets</h2>
+      <p class="step">In your repository, open <b>Settings &gt; Secrets &gt; Actions</b> and add:</p>
+      <ol>
+        <li><code>ANILIST_TOKEN</code> - the AniList token from step 2</li>
+        <li><code>ANILIST_USERNAME</code> - your AniList username</li>
+        <li><code>MAL_TOKEN</code> - the MyAnimeList token from step 3</li>
+        <li><code>MAL_USERNAME</code> - your MyAnimeList username</li>
+      </ol>
+      <p class="muted">
+        Optionally keep <code>ANILIST_CLIENT_ID</code>, <code>ANILIST_CLIENT_SECRET</code>,
+        <code>MAL_CLIENT_ID</code>, <code>MAL_CLIENT_SECRET</code> and <code>TOKEN_JSON</code>
+        for auto-refreshing tokens - see the README.
+      </p>
+    </div>
+
+    <footer>
+      Anime List Sync - the sync workflow runs daily at 04:00 UTC and updates your README.
+    </footer>
+  </main>
+
+  <script src="assets/site.js"></script>
+  <script>
+    document.getElementById('anilist-start').addEventListener('click', function () {
+      window.AnimeListSyncSite.startAniList();
+    });
+    document.getElementById('mal-start').addEventListener('click', function () {
+      window.AnimeListSyncSite.startMAL();
+    });
+    window.AnimeListSyncSite.init();
+  </script>
+</body>
+</html>

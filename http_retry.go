@@ -1,0 +1,268 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+)
+
+// defaultBackoffConfig defines the default exponential backoff settings.
+var defaultBackoffConfig = ExponentialBackoff{
+	InitialInterval: 1 * time.Second,
+	MaxInterval:     30 * time.Second,
+	Multiplier:      2.0,
+}
+
+// BackoffStrategy defines retry delay behavior.
+type BackoffStrategy interface {
+	Duration(attempt int) time.Duration
+}
+
+// ExponentialBackoff implements exponential backoff.
+type ExponentialBackoff struct {
+	InitialInterval time.Duration
+	MaxInterval     time.Duration
+	Multiplier      float64
+}
+
+func (b *ExponentialBackoff) Duration(attempt int) time.Duration {
+	if attempt == 0 {
+		return 0
+	}
+	delay := float64(b.InitialInterval) * math.Pow(b.Multiplier, float64(attempt-1))
+	if delay > float64(b.MaxInterval) {
+		return b.MaxInterval
+	}
+	return time.Duration(delay)
+}
+
+// shouldRetryStatus determines if a response status code should trigger a retry.
+func shouldRetryStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests ||
+		statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		(statusCode >= 500 && statusCode < 600)
+}
+
+// isRetryable determines if an error or response should trigger a retry.
+func isRetryable(err error, resp *http.Response) bool {
+	if err != nil {
+		return isTransientNetworkError(err)
+	}
+	if resp == nil {
+		return false
+	}
+	return shouldRetryStatus(resp.StatusCode)
+}
+
+// isTransientNetworkError reports whether a transport error is worth retrying.
+// A per-attempt timeout counts: slow upstreams (Jikan proxies MyAnimeList)
+// routinely stall on one connection and answer on the next.
+func isTransientNetworkError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED),
+		errors.Is(err, syscall.ECONNRESET),
+		errors.Is(err, syscall.EPIPE),
+		errors.Is(err, io.EOF),
+		errors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	// Transports that only carry a message (test doubles, wrapped strings).
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "connection reset") ||
+		strings.Contains(errStr, "broken pipe")
+}
+
+// cloneRequest creates a copy of an HTTP request, including its body.
+func cloneRequest(req *http.Request) *http.Request {
+	r := req.Clone(req.Context())
+	if req.Body != nil && req.Body != http.NoBody {
+		body, _ := io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		r.Body = io.NopCloser(strings.NewReader(string(body)))
+		req.Body = io.NopCloser(strings.NewReader(string(body)))
+	}
+	return r
+}
+
+// retryableRoundTripper implements http.RoundTripper with retry logic.
+type retryableRoundTripper struct {
+	underlying http.RoundTripper
+	maxRetries int
+	backoff    BackoffStrategy
+}
+
+// NewRetryableTransport wraps an http.Client's Transport with retry logic.
+func NewRetryableTransport(baseClient *http.Client, maxRetries int) http.RoundTripper {
+	underlying := baseClient.Transport
+	if underlying == nil {
+		underlying = http.DefaultTransport
+	}
+	return &retryableRoundTripper{
+		underlying: underlying,
+		maxRetries: maxRetries,
+		backoff:    &defaultBackoffConfig,
+	}
+}
+
+// RoundTrip executes a single HTTP transaction with retry logic.
+func (t *retryableRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return executeWithRetry(req, t.maxRetries, t.backoff, func(req *http.Request) (*http.Response, error) {
+		return t.underlying.RoundTrip(req)
+	})
+}
+
+// executeWithRetry executes an HTTP request function with retry logic.
+// This is a shared implementation used by both RoundTripper and RetryableClient.
+func executeWithRetry(
+	req *http.Request,
+	maxRetries int,
+	backoff BackoffStrategy,
+	doRequest func(*http.Request) (*http.Response, error),
+) (*http.Response, error) {
+	var lastErr error
+	var lastStatus int
+	var nextWait time.Duration
+	var rateLimited bool
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			if rateLimited {
+				LogWarn(req.Context(), "[HTTP RETRY] Attempt %d/%d for %s (rate limited, waiting %v)",
+					attempt, maxRetries, req.URL, nextWait)
+			} else {
+				LogWarn(req.Context(), "[HTTP RETRY] Attempt %d/%d for %s (waiting %v)",
+					attempt, maxRetries, req.URL, nextWait)
+			}
+
+			timer := time.NewTimer(nextWait)
+			select {
+			case <-timer.C:
+			case <-req.Context().Done():
+				timer.Stop()
+				return nil, req.Context().Err()
+			}
+		}
+
+		reqClone := cloneRequest(req)
+		resp, err := doRequest(reqClone)
+
+		if err == nil && !shouldRetryStatus(resp.StatusCode) {
+			return resp, nil
+		}
+
+		// Compute the wait for the next retry before closing the response
+		// so we can read the Retry-After header if present.
+		// Skip on the last iteration — the value will never be used.
+		if attempt < maxRetries {
+			nextWait, rateLimited = retryAfterOrBackoff(resp, attempt+1, backoff)
+		}
+
+		if resp != nil {
+			lastStatus = resp.StatusCode
+			_ = resp.Body.Close()
+		}
+
+		if err != nil {
+			lastErr = err
+		}
+
+		// A retryable status never reaches here, so only a transport
+		// error can be permanent at this point.
+		if !isRetryable(err, resp) {
+			return nil, err
+		}
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	// Keep the status: callers must be able to tell rate limiting (429)
+	// from an upstream outage (5xx) after the response body is gone.
+	return nil, fmt.Errorf("max retries (%d) exhausted, last status: %d %s",
+		maxRetries, lastStatus, http.StatusText(lastStatus))
+}
+
+// parseRetryAfter parses the value of a Retry-After header per RFC 7231 §7.1.3.
+// Supports both delay-seconds (integer) and HTTP-date formats.
+// Returns the duration to wait and true if the value is valid and in the future.
+func parseRetryAfter(v string) (time.Duration, bool) {
+	seconds, err := strconv.Atoi(v)
+	if err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second, true
+	}
+	t, err := http.ParseTime(v)
+	if err == nil {
+		if d := time.Until(t); d > 0 {
+			return d, true
+		}
+	}
+	return 0, false
+}
+
+// retryAfterOrBackoff returns the wait duration before the next retry and
+// whether the duration came from a Retry-After header (true) or backoff (false).
+// For 429 Too Many Requests responses with a Retry-After header, it uses
+// that value to wait precisely until the rate limit window resets.
+// Falls back to exponential backoff otherwise.
+func retryAfterOrBackoff(resp *http.Response, attempt int, backoff BackoffStrategy) (time.Duration, bool) {
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		if v := resp.Header.Get("Retry-After"); v != "" {
+			if d, ok := parseRetryAfter(v); ok {
+				return d, true
+			}
+		}
+	}
+	return backoff.Duration(attempt), false
+}
+
+// withTimeout adds a timeout to the context for API calls.
+func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, timeout)
+}
+
+// HTTPClient interface for flexibility and testing.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
+// RetryableClient wraps HTTPClient with retry logic.
+type RetryableClient struct {
+	client     HTTPClient
+	maxRetries int
+	backoff    BackoffStrategy
+}
+
+// NewRetryableClient creates a new RetryableClient with default backoff strategy.
+func NewRetryableClient(baseClient *http.Client, maxRetries int) *RetryableClient {
+	return &RetryableClient{
+		client:     baseClient,
+		maxRetries: maxRetries,
+		backoff:    &defaultBackoffConfig,
+	}
+}
+
+// Do executes the HTTP request with retry logic.
+func (r *RetryableClient) Do(req *http.Request) (*http.Response, error) {
+	return executeWithRetry(req, r.maxRetries, r.backoff, r.client.Do)
+}

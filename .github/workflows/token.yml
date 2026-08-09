@@ -1,0 +1,80 @@
+name: Get MyAnimeList token
+
+# One-time helper for the token-based setup: exchanges the authorization code
+# produced by the setup site (docs/) for a MyAnimeList access token.
+#
+# MyAnimeList's token endpoint does not allow browser requests (no CORS), so
+# the exchange has to run here in Actions. Run this workflow once and copy the
+# access token from the log into the MAL_TOKEN repository secret.
+#
+# Required secrets: MAL_CLIENT_ID, MAL_CLIENT_SECRET (from your MAL OAuth app)
+
+on:
+  workflow_dispatch:
+    inputs:
+      auth_code:
+        description: "Authorization code from the setup site"
+        required: true
+      code_verifier:
+        description: "PKCE verifier (shown on the setup site, keep it)"
+
+permissions:
+  contents: read
+
+jobs:
+  exchange:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Exchange authorization code
+        id: exchange
+        env:
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          AUTH_CODE: ${{ inputs.auth_code }}
+          VERIFIER: ${{ inputs.code_verifier }}
+        run: |
+          set -euo pipefail
+          if [ -z "$MAL_CLIENT_ID" ] || [ -z "$MAL_CLIENT_SECRET" ]; then
+            echo "::error::MAL_CLIENT_ID and MAL_CLIENT_SECRET secrets are required - see the README."
+            exit 1
+          fi
+          response="$(curl -sS -X POST 'https://myanimelist.net/v1/oauth2/token' \
+            -d "grant_type=authorization_code" \
+            -d "client_id=${MAL_CLIENT_ID}" \
+            -d "client_secret=${MAL_CLIENT_SECRET}" \
+            -d "code=${AUTH_CODE}" \
+            -d "code_verifier=${VERIFIER}")"
+          echo "Exchange response: $response"
+          if ! echo "$response" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('access_token') else 1)"; then
+            echo "::error::Token exchange failed - the authorization code is single-use and expires, or the verifier does not match. Run the setup site flow again and retry."
+            exit 1
+          fi
+          access_token="$(echo "$response" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")"
+          echo "::add-mask::$access_token"
+          echo "access_token=$access_token" >> "$GITHUB_OUTPUT"
+
+      - name: Verify token
+        env:
+          ACCESS_TOKEN: ${{ steps.exchange.outputs.access_token }}
+        run: |
+          username="$(curl -sS -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            'https://api.myanimelist.net/v2/users/@me?fields=name')"
+          echo "MAL API says: $username"
+          if ! echo "$username" | python3 -c "import sys,json; sys.exit(0 if json.load(sys.stdin).get('name') else 1)"; then
+            echo "::error::Token verification failed - check your OAuth app settings and try again."
+            exit 1
+          fi
+
+      - name: Show token
+        env:
+          ACCESS_TOKEN: ${{ steps.exchange.outputs.access_token }}
+        run: |
+          echo "================================================================================"
+          echo "Your MyAnimeList access token (valid until refresh_token is used):"
+          echo
+          echo "  $ACCESS_TOKEN"
+          echo
+          echo "Copy it now into the repository secret: Settings > Secrets > Actions > MAL_TOKEN"
+          echo "(Click the masked value to reveal it, then copy.)"
+          echo "================================================================================"

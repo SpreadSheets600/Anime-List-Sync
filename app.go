@@ -1,0 +1,770 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/rl404/verniy"
+)
+
+const (
+	mediaTypeAnime = "anime"
+	mediaTypeManga = "manga"
+)
+
+type App struct {
+	config Config
+
+	mal                *MyAnimeListClient
+	anilist            *AnilistClient
+	anilistScoreFormat verniy.ScoreFormat
+	hatoClient         *HatoClient
+	jikanClient        *JikanClient
+	mappings           *MappingsConfig
+	favSync            *FavoritesSync
+	reverse            bool // true for MAL→AniList direction
+	mangaSync          bool // true when only manga is synced
+	allSync            bool // true when both anime and manga are synced
+
+	offlineStrategy *OfflineDatabaseStrategy
+
+	animeUpdater        *Updater
+	mangaUpdater        *Updater
+	reverseAnimeUpdater *Updater
+	reverseMangaUpdater *Updater
+
+	syncReport *SyncReport
+
+	// Cached lists for favorites sync reuse
+	fetchedAnimeFromAniList []Anime
+	fetchedAnimeFromMAL     []Anime
+	fetchedMangaFromAniList []Manga
+	fetchedMangaFromMAL     []Manga
+}
+
+// NewApp creates a new App instance with configured clients and updaters.
+// reverse=true selects MAL→AniList direction; false (default) = AniList→MAL.
+//
+//nolint:funlen // Function creates multiple services and updaters - acceptable complexity
+func NewApp(ctx context.Context, config Config, reverse bool) (*App, error) {
+	LogStage(ctx, "Initializing...")
+
+	oauthMAL, err := NewMyAnimeListOAuth(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("error creating mal oauth: %w", err)
+	}
+	LogDebug(ctx, "Got MAL token")
+
+	malClient := NewMyAnimeListClient(ctx, oauthMAL, config.MyAnimeList.Username, config.GetHTTPTimeout(), *verbose)
+	LogDebug(ctx, "MAL client created")
+
+	oauthAnilist, err := NewAnilistOAuth(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("error creating anilist oauth: %w", err)
+	}
+	LogDebug(ctx, "Got Anilist token")
+
+	anilistClient := NewAnilistClient(ctx, oauthAnilist, config.Anilist.Username, config.GetHTTPTimeout(), *verbose)
+	LogDebug(ctx, "Anilist client created")
+
+	scoreFormat, err := anilistClient.GetUserScoreFormat(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error getting user score format: %w", err)
+	}
+	LogDebug(ctx, "AniList score format: %s", scoreFormat)
+
+	// Create services — AniList services know the direction so they set isReverse on returned entries.
+	malAnimeService := NewMALAnimeService(malClient)
+	malMangaService := NewMALMangaService(malClient)
+	anilistAnimeService := NewAniListAnimeService(anilistClient, scoreFormat, reverse)
+	anilistMangaService := NewAniListMangaService(anilistClient, scoreFormat, reverse)
+
+	// Determine if anime synchronization will be performed.
+	// Offline database and ARM API are only needed for anime, not for manga.
+	needsAnime := !(*mangaSync) || *allSync
+	offlineStrategy, hatoStrategy, hatoClient, armStrategy, jikanStrategy, jikanClient := loadIDMappingStrategies(ctx, config, needsAnime)
+
+	// Load user mappings
+	mappings, err := LoadMappings(config.MappingsFilePath)
+	if err != nil {
+		LogWarn(ctx, "Failed to load mappings: %v (continuing without)", err)
+		mappings = &MappingsConfig{}
+	}
+	manualStrategy := ManualMappingStrategy{Mappings: mappings, Reverse: reverse}
+
+	// Build ignore titles from mappings + hardcoded defaults
+	defaultIgnoreTitles := map[string]struct{}{
+		"scott pilgrim takes off":       {},
+		"bocchi the rock! recap part 2": {},
+	}
+	for _, t := range mappings.Ignore.Titles {
+		defaultIgnoreTitles[strings.ToLower(t)] = struct{}{}
+	}
+
+	// Build ignore IDs from mappings: separate maps for forward and reverse updaters
+	ignoreAniListIDs := make(map[int]struct{}, len(mappings.Ignore.AniListIDs))
+	for _, id := range mappings.Ignore.AniListIDs {
+		ignoreAniListIDs[id] = struct{}{}
+	}
+
+	ignoreMALIDs := make(map[int]struct{}, len(mappings.Ignore.MALIDs))
+	for _, id := range mappings.Ignore.MALIDs {
+		ignoreMALIDs[id] = struct{}{}
+	}
+
+	// Create updaters — forward (AniList→MAL) and reverse (MAL→AniList).
+	// ManualMappingStrategy is shared but direction-aware via its Reverse field.
+	// Forward strategies have Reverse=false (default); reverse strategies have Reverse=true.
+	reverseManualStrategy := ManualMappingStrategy{Mappings: mappings, Reverse: true}
+
+	animeUpdater := &Updater{
+		Prefix:       "AniList to MAL Anime",
+		Service:      malAnimeService,
+		Statistics:   NewStatistics(),
+		IgnoreTitles: defaultIgnoreTitles,
+		IgnoreIDs:    ignoreAniListIDs,
+		ForceSync:    *forceSync,
+		DryRun:       *dryRun,
+		Reverse:      false,
+		MediaType:    mediaTypeAnime,
+		StrategyChain: NewStrategyChain(
+			manualStrategy,
+			IDStrategy{},
+			offlineStrategy,
+			hatoStrategy,
+			armStrategy,
+			TitleStrategy{},
+			APISearchStrategy{Service: malAnimeService},
+		),
+	}
+
+	mangaUpdater := &Updater{
+		Prefix:       "AniList to MAL Manga",
+		Service:      malMangaService,
+		Statistics:   NewStatistics(),
+		IgnoreTitles: map[string]struct{}{},
+		IgnoreIDs:    ignoreAniListIDs,
+		ForceSync:    *forceSync,
+		DryRun:       *dryRun,
+		Reverse:      false,
+		MediaType:    mediaTypeManga,
+		StrategyChain: NewStrategyChain(
+			manualStrategy,
+			IDStrategy{},
+			hatoStrategy,
+			TitleStrategy{},
+			jikanStrategy,
+			APISearchStrategy{Service: malMangaService},
+		),
+	}
+
+	reverseAnimeUpdater := &Updater{
+		Prefix:       "MAL to AniList Anime",
+		Service:      anilistAnimeService,
+		Statistics:   NewStatistics(),
+		IgnoreTitles: map[string]struct{}{},
+		IgnoreIDs:    ignoreMALIDs,
+		ForceSync:    *forceSync,
+		DryRun:       *dryRun,
+		Reverse:      true,
+		MediaType:    mediaTypeAnime,
+		StrategyChain: NewStrategyChain(
+			reverseManualStrategy,
+			IDStrategy{},
+			offlineStrategy,
+			hatoStrategy,
+			armStrategy,
+			TitleStrategy{},
+			MALIDStrategy{Service: anilistAnimeService},
+			APISearchStrategy{Service: anilistAnimeService},
+		),
+	}
+
+	reverseMangaUpdater := &Updater{
+		Prefix:       "MAL to AniList Manga",
+		Service:      anilistMangaService,
+		Statistics:   NewStatistics(),
+		IgnoreTitles: map[string]struct{}{},
+		IgnoreIDs:    ignoreMALIDs,
+		ForceSync:    *forceSync,
+		DryRun:       *dryRun,
+		Reverse:      true,
+		MediaType:    mediaTypeManga,
+		StrategyChain: NewStrategyChain(
+			reverseManualStrategy,
+			IDStrategy{},
+			hatoStrategy,
+			TitleStrategy{},
+			jikanStrategy,
+			MALIDStrategy{Service: anilistMangaService},
+			APISearchStrategy{Service: anilistMangaService},
+		),
+	}
+
+	LogInfoSuccess(ctx, "Initialization complete")
+
+	// hatoClient is already created by loadIDMappingStrategies() and will be used for both strategies and cache saving
+
+	// Create favorites sync if enabled
+	var favSync *FavoritesSync
+	if config.Favorites.Enabled {
+		favSync = NewFavoritesSync(anilistClient, *dryRun)
+		LogInfoSuccess(ctx, "★ Favorites sync enabled")
+	}
+
+	return &App{
+		config:              config,
+		mal:                 malClient,
+		anilist:             anilistClient,
+		anilistScoreFormat:  scoreFormat,
+		hatoClient:          hatoClient,
+		jikanClient:         jikanClient,
+		mappings:            mappings,
+		offlineStrategy:     offlineStrategy,
+		favSync:             favSync,
+		reverse:             reverse,
+		mangaSync:           *mangaSync,
+		allSync:             *allSync,
+		animeUpdater:        animeUpdater,
+		mangaUpdater:        mangaUpdater,
+		reverseAnimeUpdater: reverseAnimeUpdater,
+		reverseMangaUpdater: reverseMangaUpdater,
+		syncReport:          NewSyncReport(),
+	}, nil
+}
+
+// loadIDMappingStrategies loads ID mapping resources (offline database and ARM API).
+// These resources are only used for anime synchronization, not for manga.
+// Strategies with nil Database/Client are no-ops (return nil, false, nil).
+//
+// Parameters:
+//   - needsAnime: if false, offline DB and ARM API will not be loaded
+func loadIDMappingStrategies(
+	ctx context.Context,
+	config Config,
+	needsAnime bool,
+) (*OfflineDatabaseStrategy, HatoAPIStrategy, *HatoClient, ARMAPIStrategy, JikanAPIStrategy, *JikanClient) {
+	var offlineDB *OfflineDatabase
+	// Only load offline database for anime synchronization
+	if needsAnime && config.OfflineDatabase.Enabled {
+		LogStage(ctx, "Loading offline database...")
+		var err error
+		offlineDB, err = LoadOfflineDatabase(ctx, config.OfflineDatabase)
+		if err != nil {
+			LogWarn(ctx, "Failed to load offline database: %v (continuing without it)", err)
+		} else {
+			LogInfoSuccess(ctx, "Offline database loaded (%d entries)", offlineDB.entries)
+		}
+	}
+
+	var hatoClient *HatoClient
+	if config.HatoAPI.Enabled {
+		hatoClient = NewHatoClient(ctx, config.HatoAPI.BaseURL, config.GetHTTPTimeout(), config.HatoAPI.CacheDir)
+		LogInfoSuccess(ctx, "Hato API enabled (%s)", config.HatoAPI.BaseURL)
+	}
+
+	var armClient *ARMClient
+	// Only load ARM API for anime synchronization
+	if needsAnime && config.ARMAPI.Enabled {
+		armClient = NewARMClient(config.ARMAPI.BaseURL, config.GetHTTPTimeout())
+		LogInfoSuccess(ctx, "ARM API enabled (%s)", config.ARMAPI.BaseURL)
+	}
+
+	var jikanClient *JikanClient
+	if config.JikanAPI.Enabled {
+		jikanClient = NewJikanClient(ctx, config.JikanAPI.CacheDir, config.JikanAPI.CacheMaxAge)
+		LogInfoSuccess(ctx, "Jikan API enabled (manga ID mapping)")
+	}
+
+	return &OfflineDatabaseStrategy{Database: offlineDB},
+		HatoAPIStrategy{Client: hatoClient},
+		hatoClient,
+		ARMAPIStrategy{Client: armClient},
+		JikanAPIStrategy{Client: jikanClient},
+		jikanClient
+}
+
+// Refresh resets per-run state and optionally reloads the offline database.
+// Call before each Run() in watch mode to prevent state accumulation between cycles.
+func (a *App) Refresh(ctx context.Context) {
+	if a.config.OfflineDatabase.Enabled && a.config.OfflineDatabase.AutoUpdate {
+		if db, err := LoadOfflineDatabase(ctx, a.config.OfflineDatabase); err != nil {
+			LogWarn(ctx, "Failed to refresh offline database: %v", err)
+		} else {
+			a.offlineStrategy.Database = db
+		}
+	}
+
+	a.syncReport = NewSyncReport()
+	for _, u := range []*Updater{
+		a.animeUpdater, a.mangaUpdater,
+		a.reverseAnimeUpdater, a.reverseMangaUpdater,
+	} {
+		u.Statistics = NewStatistics()
+		u.UnmappedList = nil
+		u.ResolvedMappings = nil
+	}
+}
+
+func (a *App) Run(ctx context.Context) error {
+	// Reset cached lists at the start of each run (important for watch mode).
+	a.fetchedAnimeFromAniList = nil
+	a.fetchedAnimeFromMAL = nil
+	a.fetchedMangaFromAniList = nil
+	a.fetchedMangaFromMAL = nil
+
+	startTime := time.Now()
+
+	LogStage(ctx, "=== Sync started: %s ===", DirectionOf(a.reverse).Label())
+
+	var err error
+	if a.reverse {
+		err = a.runReverseSync(ctx)
+	} else {
+		err = a.runNormalSync(ctx)
+	}
+
+	// Collect statistics for global summary
+	var updaters []*Updater
+	if a.reverse {
+		updaters = []*Updater{a.reverseAnimeUpdater, a.reverseMangaUpdater}
+	} else {
+		updaters = []*Updater{a.animeUpdater, a.mangaUpdater}
+	}
+	stats := make([]*Statistics, 0, len(updaters))
+	for _, u := range updaters {
+		stats = append(stats, u.Statistics)
+	}
+
+	// Collect unmapped entries from all updaters and save state
+	a.saveUnmappedState(ctx, updaters)
+
+	// Favorites sync phase (runs after main sync, non-fatal)
+	if a.favSync != nil {
+		a.syncFavorites(ctx)
+	}
+
+	// Print global summary
+	PrintGlobalSummary(ctx, stats, a.syncReport, time.Since(startTime), a.reverse)
+
+	// Write stats file for CI/README updates (even on failure)
+	if *statsFile != "" {
+		err := WriteStatsFile(*statsFile, updaters, a.syncReport, time.Since(startTime), a.reverse, err)
+		if err != nil {
+			LogWarn(ctx, "Failed to write stats file: %v", err)
+		}
+	}
+
+	return err
+}
+
+func (a *App) saveUnmappedState(ctx context.Context, updaters []*Updater) {
+	totalUnmapped := 0
+	for _, u := range updaters {
+		totalUnmapped += len(u.UnmappedList)
+	}
+	allUnmapped := make([]UnmappedEntry, 0, totalUnmapped)
+	for _, u := range updaters {
+		allUnmapped = append(allUnmapped, u.UnmappedList...)
+	}
+
+	// Add unmapped to sync report for display
+	a.syncReport.AddUnmappedItems(allUnmapped)
+
+	if len(allUnmapped) == 0 {
+		return
+	}
+
+	state := &UnmappedState{
+		Entries:   allUnmapped,
+		UpdatedAt: time.Now(),
+	}
+	saveErr := state.Save("")
+	if saveErr != nil {
+		LogWarn(ctx, "Failed to save unmapped state: %v", saveErr)
+	}
+}
+
+func (a *App) runNormalSync(ctx context.Context) error {
+	if a.mangaSync || a.allSync {
+		err := a.syncManga(ctx)
+		if err != nil {
+			return fmt.Errorf("error syncing manga: %w", err)
+		}
+	}
+
+	if !a.mangaSync || a.allSync {
+		err := a.syncAnime(ctx)
+		if err != nil {
+			return fmt.Errorf("error syncing anime: %w", err)
+		}
+	}
+
+	// Save Hato cache if enabled
+	if a.hatoClient != nil {
+		err := a.hatoClient.SaveCache(ctx)
+		if err != nil {
+			LogWarn(ctx, "Failed to save Hato cache: %v", err)
+		}
+	}
+
+	// Save Jikan cache if enabled
+	if a.jikanClient != nil {
+		err := a.jikanClient.SaveCache(ctx)
+		if err != nil {
+			LogWarn(ctx, "Failed to save Jikan cache: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (a *App) runReverseSync(ctx context.Context) error {
+	if a.mangaSync || a.allSync {
+		err := a.reverseSyncManga(ctx)
+		if err != nil {
+			return fmt.Errorf("error reverse syncing manga: %w", err)
+		}
+	}
+
+	if !a.mangaSync || a.allSync {
+		err := a.reverseSyncAnime(ctx)
+		if err != nil {
+			return fmt.Errorf("error reverse syncing anime: %w", err)
+		}
+	}
+
+	// Save Hato cache if enabled
+	if a.hatoClient != nil {
+		err := a.hatoClient.SaveCache(ctx)
+		if err != nil {
+			LogWarn(ctx, "Failed to save Hato cache: %v", err)
+		}
+	}
+
+	// Save Jikan cache if enabled
+	if a.jikanClient != nil {
+		err := a.jikanClient.SaveCache(ctx)
+		if err != nil {
+			LogWarn(ctx, "Failed to save Jikan cache: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// syncAnimeFromAnilistToMAL syncs anime from AniList to MAL.
+func (a *App) syncAnime(ctx context.Context) error {
+	return a.performSync(ctx, mediaTypeAnime, false, a.animeUpdater)
+}
+
+// syncMangaFromAnilistToMAL syncs manga from AniList to MAL.
+func (a *App) syncManga(ctx context.Context) error {
+	return a.performSync(ctx, mediaTypeManga, false, a.mangaUpdater)
+}
+
+// reverseSyncAnimeFromMALToAnilist syncs anime from MAL to AniList.
+func (a *App) reverseSyncAnime(ctx context.Context) error {
+	return a.performSync(ctx, "anime", true, a.reverseAnimeUpdater)
+}
+
+// reverseSyncMangaFromMALToAnilist syncs manga from MAL to AniList.
+func (a *App) reverseSyncManga(ctx context.Context) error {
+	return a.performSync(ctx, "manga", true, a.reverseMangaUpdater)
+}
+
+// performSync is a generic sync function that handles both anime and manga syncing.
+func (a *App) performSync(ctx context.Context, mediaType string, reverse bool, updater *Updater) error {
+	var srcs []Source
+	var tgts []Target
+	var err error
+
+	if reverse {
+		// Reverse sync: MAL -> AniList
+		srcs, tgts, err = a.fetchFromMALToAnilist(ctx, mediaType, updater.Prefix)
+	} else {
+		// Normal sync: AniList -> MAL
+		srcs, tgts, err = a.fetchFromAnilistToMAL(ctx, mediaType, updater.Prefix)
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Pass syncReport to accumulate warnings
+	updater.Update(ctx, srcs, tgts, a.syncReport)
+
+	// Don't print individual stats or reset - global summary will be printed at the end
+
+	return nil
+}
+
+// fetchFromAnilistToMAL fetches data for AniList -> MAL sync.
+// Note: this function intentionally mirrors the corresponding MAL -> AniList
+// fetch function, so some duplication is expected and acceptable. We keep
+// these flows separate for clarity and to make each sync direction easier
+// to reason about, even though this may trigger dupl linter warnings.
+func (a *App) fetchFromAnilistToMAL(ctx context.Context, mediaType string, prefix string) ([]Source, []Target, error) {
+	LogDebug(ctx, "[%s] Fetching AniList...", prefix)
+
+	if mediaType == mediaTypeAnime {
+		srcList, err := a.anilist.GetUserAnimeList(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error getting user anime list from anilist: %w", err)
+		}
+
+		LogDebug(ctx, "[%s] Fetching MAL...", prefix)
+		tgtList, err := a.mal.GetUserAnimeList(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error getting user anime list from mal: %w", err)
+		}
+
+		animeList := newAnimesFromMediaListGroups(ctx, srcList, a.anilistScoreFormat, false)
+		malList := newAnimesFromMalUserAnimes(tgtList, false)
+		srcs := newSourcesFromAnimes(animeList)
+		tgts := newTargetsFromAnimes(malList)
+
+		// Cache lists for favorites sync
+		a.fetchedAnimeFromAniList = animeList
+		a.fetchedAnimeFromMAL = malList
+
+		LogDebug(ctx, "[%s] Got %d from AniList, %d from MAL", prefix, len(srcs), len(tgts))
+
+		return srcs, tgts, nil
+	}
+
+	// manga
+	srcList, err := a.anilist.GetUserMangaList(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting user manga list from anilist: %w", err)
+	}
+
+	LogDebug(ctx, "[%s] Fetching MAL...", prefix)
+	tgtList, err := a.mal.GetUserMangaList(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting user manga list from mal: %w", err)
+	}
+
+	mangaList := newMangasFromMediaListGroups(ctx, srcList, a.anilistScoreFormat, false)
+	malMangaList := newMangasFromMalUserMangas(tgtList, false)
+	srcs := newSourcesFromMangas(mangaList)
+	tgts := newTargetsFromMangas(malMangaList)
+
+	// Cache lists for favorites sync
+	a.fetchedMangaFromAniList = mangaList
+	a.fetchedMangaFromMAL = malMangaList
+
+	LogDebug(ctx, "[%s] Got %d from AniList, %d from MAL", prefix, len(srcs), len(tgts))
+
+	return srcs, tgts, nil
+}
+
+// fetchFromMALToAnilist fetches data for MAL -> AniList sync.
+// The structure of this function intentionally mirrors fetchFromAnilistToMAL
+// to keep the two sync directions explicit and symmetrical.
+func (a *App) fetchFromMALToAnilist(ctx context.Context, mediaType string, prefix string) ([]Source, []Target, error) {
+	LogDebug(ctx, "[%s] Fetching MAL...", prefix)
+
+	if mediaType == mediaTypeAnime {
+		srcList, err := a.mal.GetUserAnimeList(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error getting user anime list from mal: %w", err)
+		}
+
+		LogDebug(ctx, "[%s] Fetching AniList...", prefix)
+		tgtList, err := a.anilist.GetUserAnimeList(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("error getting user anime list from anilist: %w", err)
+		}
+
+		malAnimeList := newAnimesFromMalUserAnimes(srcList, true)
+		anilistAnimeList := newAnimesFromMediaListGroups(ctx, tgtList, a.anilistScoreFormat, true)
+		srcs := newSourcesFromAnimes(malAnimeList)
+		tgts := newTargetsFromAnimes(anilistAnimeList)
+
+		// Cache lists for favorites sync
+		a.fetchedAnimeFromMAL = malAnimeList
+		a.fetchedAnimeFromAniList = anilistAnimeList
+
+		LogDebug(ctx, "[%s] Got %d from MAL, %d from AniList", prefix, len(srcs), len(tgts))
+
+		return srcs, tgts, nil
+	}
+
+	// manga
+	srcList, err := a.mal.GetUserMangaList(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting user manga list from mal: %w", err)
+	}
+
+	LogDebug(ctx, "[%s] Fetching AniList...", prefix)
+	tgtList, err := a.anilist.GetUserMangaList(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error getting user manga list from anilist: %w", err)
+	}
+
+	malMangaList := newMangasFromMalUserMangas(srcList, true)
+	anilistMangaList := newMangasFromMediaListGroups(ctx, tgtList, a.anilistScoreFormat, true)
+	srcs := newSourcesFromMangas(malMangaList)
+	tgts := newTargetsFromMangas(anilistMangaList)
+
+	// Cache lists for favorites sync
+	a.fetchedMangaFromMAL = malMangaList
+	a.fetchedMangaFromAniList = anilistMangaList
+
+	LogDebug(ctx, "[%s] Got %d from MAL, %d from AniList", prefix, len(srcs), len(tgts))
+
+	return srcs, tgts, nil
+}
+
+// buildFavoritesListFromMappings creates a list of anime/manga for favorites sync
+// by combining MAL lists with AniList IDs from resolved mappings.
+// For reverse sync (MAL → AniList), we need:
+// - MAL ID (from MAL list)
+// - AniList ID (from resolved mapping)
+// - IsFavourite (from AniList target in mapping).
+func (a *App) buildFavoritesListFromMappings(
+	malList []Anime,
+	mappings []resolvedMapping,
+) []Anime {
+	// Create MAL ID → mapping lookup
+	malIDToMapping := make(map[int]resolvedMapping)
+	for _, m := range mappings {
+		if src, ok := m.src.(Anime); ok {
+			malIDToMapping[src.IDMal] = m
+		}
+	}
+
+	// Build favorites list: iterate MAL list, fill AniList IDs from mappings
+	result := make([]Anime, 0, len(malList))
+	for _, malAnime := range malList {
+		mapping, hasMapping := malIDToMapping[malAnime.IDMal]
+		if !hasMapping {
+			// No AniList ID found - skip (can't toggle favorite)
+			continue
+		}
+
+		targetAnime, ok := mapping.target.(Anime)
+		if !ok {
+			continue
+		}
+
+		// Use MAL anime data with AniList ID and IsFavourite from target
+		favAnime := malAnime
+		favAnime.IDAnilist = targetAnime.IDAnilist
+		favAnime.IsFavourite = targetAnime.IsFavourite
+		result = append(result, favAnime)
+	}
+
+	return result
+}
+
+// buildMangaFavoritesListFromMappings creates a list of manga for favorites sync
+// by combining MAL lists with AniList IDs from resolved mappings.
+func (a *App) buildMangaFavoritesListFromMappings(
+	malList []Manga,
+	mappings []resolvedMapping,
+) []Manga {
+	// Create MAL ID → mapping lookup
+	malIDToMapping := make(map[int]resolvedMapping)
+	for _, m := range mappings {
+		if src, ok := m.src.(Manga); ok {
+			malIDToMapping[src.IDMal] = m
+		}
+	}
+
+	// Build favorites list: iterate MAL list, fill AniList IDs from mappings
+	result := make([]Manga, 0, len(malList))
+	for _, malManga := range malList {
+		mapping, hasMapping := malIDToMapping[malManga.IDMal]
+		if !hasMapping {
+			// No AniList ID found - skip (can't toggle favorite)
+			continue
+		}
+
+		targetManga, ok := mapping.target.(Manga)
+		if !ok {
+			continue
+		}
+
+		// Use MAL manga data with AniList ID and IsFavourite from target
+		favManga := malManga
+		favManga.IDAnilist = targetManga.IDAnilist
+		favManga.IsFavourite = targetManga.IsFavourite
+		result = append(result, favManga)
+	}
+
+	return result
+}
+
+// syncFavorites performs favorites synchronization between AniList and MAL.
+// This is a separate phase that runs after the main status/progress sync.
+// If only --manga or --anime was used, the cache for the other type is nil and
+// favorites for that type are silently skipped (logged as warning).
+func (a *App) syncFavorites(ctx context.Context) {
+	LogStage(ctx, "Syncing favorites...")
+
+	if a.jikanClient == nil {
+		LogWarn(ctx, "★ [Favorites] Jikan API is not enabled — cannot fetch MAL favorites (skipping favorites sync)")
+		return
+	}
+
+	malAnimeFavs, malMangaFavs, err := a.jikanClient.GetUserFavorites(ctx, a.config.MyAnimeList.Username)
+	if err != nil {
+		LogWarn(ctx, "★ [Favorites] Failed to fetch MAL favorites: %v (skipping favorites sync)", err)
+		return
+	}
+
+	if a.reverse {
+		a.syncFavoritesReverse(ctx, malAnimeFavs, malMangaFavs)
+	} else {
+		a.syncFavoritesForward(ctx, malAnimeFavs, malMangaFavs)
+	}
+}
+
+// syncFavoritesReverse handles MAL → AniList favorites sync (adds missing on AniList).
+func (a *App) syncFavoritesReverse(ctx context.Context, malAnimeFavs, malMangaFavs map[int]struct{}) {
+	if a.fetchedAnimeFromMAL == nil {
+		LogWarn(ctx, "★ [Favorites] Anime list not synced — anime favorites skipped (use --all to include)")
+	}
+	if a.fetchedMangaFromMAL == nil {
+		LogWarn(ctx, "★ [Favorites] Manga list not synced — manga favorites skipped (use --all to include)")
+	}
+
+	animeForFavorites := a.buildFavoritesListFromMappings(a.fetchedAnimeFromMAL, a.reverseAnimeUpdater.GetResolvedMappings())
+	mangaForFavorites := a.buildMangaFavoritesListFromMappings(a.fetchedMangaFromMAL, a.reverseMangaUpdater.GetResolvedMappings())
+
+	result := a.favSync.SyncToAniList(ctx, animeForFavorites, mangaForFavorites, malAnimeFavs, malMangaFavs)
+	a.syncReport.AddFavoritesResult(result)
+
+	if result.Added > 0 {
+		LogInfoSuccess(ctx, "★ Favorites sync complete: +%d added on AniList (%d skipped)", result.Added, result.Skipped)
+	} else {
+		LogInfo(ctx, "★ Favorites sync complete: all in sync (%d entries checked)", result.Skipped)
+	}
+
+	if result.Errors > 0 {
+		LogWarn(ctx, "★ Favorites sync had %d errors", result.Errors)
+	}
+}
+
+// syncFavoritesForward handles AniList → MAL favorites (report-only, MAL API has no write).
+func (a *App) syncFavoritesForward(ctx context.Context, malAnimeFavs, malMangaFavs map[int]struct{}) {
+	if a.fetchedAnimeFromAniList == nil {
+		LogWarn(ctx, "★ [Favorites] Anime list not synced — anime favorites skipped (use --all to include)")
+	}
+	if a.fetchedMangaFromAniList == nil {
+		LogWarn(ctx, "★ [Favorites] Manga list not synced — manga favorites skipped (use --all to include)")
+	}
+
+	result := a.favSync.ReportMismatches(ctx, a.fetchedAnimeFromAniList, a.fetchedMangaFromAniList, malAnimeFavs, malMangaFavs)
+	a.syncReport.AddFavoritesResult(result)
+
+	if len(result.Mismatches) > 0 {
+		LogInfo(ctx, "★ Favorites: %d mismatches (AniList→MAL, report only)", len(result.Mismatches))
+	} else {
+		LogInfoSuccess(ctx, "★ Favorites complete: all in sync")
+	}
+}

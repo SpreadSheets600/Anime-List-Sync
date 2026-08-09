@@ -1,0 +1,140 @@
+name: Sync anime/manga lists
+
+# Template deployment: this workflow syncs your AniList and MyAnimeList lists
+# on a schedule and updates the README with a stats block. See the
+# "GitHub Actions deployment" section in the README for the setup steps
+# (creating a repo from this template and configuring secrets).
+#
+# Two auth modes are supported:
+#   1. Token mode (recommended): ANILIST_TOKEN + MAL_TOKEN from the setup site
+#   2. Full OAuth mode: TOKEN_JSON + client IDs/secrets (auto-refreshing)
+#
+# Note: GitHub disables scheduled workflows in repositories with no activity
+# for 60+ days. Push a commit or re-enable the workflow to resume syncing.
+
+on:
+  schedule:
+    - cron: "0 4 * * *" # Daily at 04:00 UTC - change to your preferred time
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview changes without updating (--dry-run)"
+        type: boolean
+        default: false
+      reverse:
+        description: "Sync MAL -> AniList instead of the default direction"
+        type: boolean
+        default: false
+      force:
+        description: "Force update all entries (--force)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: anilist-mal-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build
+        run: go build -o anilist-mal-sync .
+
+      - name: Cache offline database
+        uses: actions/cache@v4
+        with:
+          path: ~/.config/anilist-mal-sync/aod-cache
+          key: aod-cache-${{ runner.os }}
+          enableCrossOsArchive: true
+
+      - name: Validate secrets
+        env:
+          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+          ANILIST_USERNAME: ${{ secrets.ANILIST_USERNAME }}
+          ANILIST_TOKEN: ${{ secrets.ANILIST_TOKEN }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          MAL_USERNAME: ${{ secrets.MAL_USERNAME }}
+          MAL_TOKEN: ${{ secrets.MAL_TOKEN }}
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+        run: |
+          missing=""
+          for var in ANILIST_USERNAME MAL_USERNAME; do
+            if [ -z "${!var}" ]; then
+              missing="$missing $var"
+            fi
+          done
+          # Mode 1 (recommended): bare access tokens
+          if [ -n "$ANILIST_TOKEN" ] && [ -n "$MAL_TOKEN" ]; then
+            echo "Auth mode: tokens"
+          # Mode 2: full OAuth with auto-refresh
+          elif [ -n "$TOKEN_JSON" ] && [ -n "$ANILIST_CLIENT_ID" ] && \
+               [ -n "$ANILIST_CLIENT_SECRET" ] && [ -n "$MAL_CLIENT_ID" ] && \
+               [ -n "$MAL_CLIENT_SECRET" ]; then
+            echo "Auth mode: OAuth (TOKEN_JSON)"
+          else
+            missing="$missing [ANILIST_TOKEN+MAL_TOKEN] or [TOKEN_JSON+client IDs/secrets]"
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:$missing - get your tokens from the setup site, see the README."
+            exit 1
+          fi
+
+      - name: Run sync
+        id: sync
+        run: |
+          args=(sync --all --stats-file sync-stats.md --non-interactive)
+          if [ "${{ inputs.dry_run || 'false' }}" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          if [ "${{ inputs.reverse || 'false' }}" = "true" ]; then
+            args+=(--reverse-direction)
+          fi
+          if [ "${{ inputs.force || 'false' }}" = "true" ]; then
+            args+=(--force)
+          fi
+          ./anilist-mal-sync "${args[@]}"
+        env:
+          TOKEN_JSON: ${{ secrets.TOKEN_JSON }}
+          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+          ANILIST_USERNAME: ${{ secrets.ANILIST_USERNAME }}
+          ANILIST_TOKEN: ${{ secrets.ANILIST_TOKEN }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          MAL_USERNAME: ${{ secrets.MAL_USERNAME }}
+          MAL_TOKEN: ${{ secrets.MAL_TOKEN }}
+          # Optional: enable favorites sync (requires Jikan API)
+          # FAVORITES_SYNC_ENABLED: "true"
+
+      - name: Update README stats
+        if: always()
+        run: python3 .github/update_readme_stats.py
+
+      - name: Commit stats
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update sync stats [skip ci]"
+            git push
+          fi

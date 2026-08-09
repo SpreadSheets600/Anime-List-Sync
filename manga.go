@@ -1,0 +1,568 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/nstratos/go-myanimelist/mal"
+	"github.com/rl404/verniy"
+)
+
+var errMangaStatusUnknown = errors.New("manga status unknown")
+
+type MangaStatus string
+
+const (
+	MangaStatusReading    MangaStatus = "reading"
+	MangaStatusCompleted  MangaStatus = "completed"
+	MangaStatusOnHold     MangaStatus = "on_hold"
+	MangaStatusDropped    MangaStatus = "dropped"
+	MangaStatusPlanToRead MangaStatus = "plan_to_read"
+	MangaStatusUnknown    MangaStatus = "unknown"
+)
+
+func (s MangaStatus) GetMalStatus() (mal.MangaStatus, error) {
+	switch s {
+	case MangaStatusReading:
+		return mal.MangaStatusReading, nil
+	case MangaStatusCompleted:
+		return mal.MangaStatusCompleted, nil
+	case MangaStatusOnHold:
+		return mal.MangaStatusOnHold, nil
+	case MangaStatusDropped:
+		return mal.MangaStatusDropped, nil
+	case MangaStatusPlanToRead:
+		return mal.MangaStatusPlanToRead, nil
+	case MangaStatusUnknown:
+		return "", errMangaStatusUnknown
+	default:
+		return "", errMangaStatusUnknown
+	}
+}
+
+func (s MangaStatus) GetAnilistStatus() string {
+	switch s {
+	case MangaStatusReading:
+		return "CURRENT"
+	case MangaStatusCompleted:
+		return "COMPLETED"
+	case MangaStatusOnHold:
+		return "PAUSED"
+	case MangaStatusDropped:
+		return "DROPPED"
+	case MangaStatusPlanToRead:
+		return "PLANNING"
+	case MangaStatusUnknown:
+		return ""
+	default:
+		return ""
+	}
+}
+
+type Manga struct {
+	IDAnilist       int
+	IDMal           int
+	Progress        int
+	ProgressVolumes int
+	Score           int
+	Status          MangaStatus
+	TitleEN         string
+	TitleJP         string
+	TitleRomaji     string
+	Chapters        int
+	Volumes         int
+	StartedAt       *time.Time
+	FinishedAt      *time.Time
+	IsFavourite     bool
+	isReverse       bool // true when used in reverse sync (MAL → AniList)
+}
+
+func (m Manga) GetTargetID() TargetID {
+	if m.isReverse {
+		return TargetID(m.IDAnilist)
+	}
+	return TargetID(m.IDMal)
+}
+
+// GetAniListID returns the AniList ID.
+func (m Manga) GetAniListID() TargetID {
+	return TargetID(m.IDAnilist)
+}
+
+// GetMALID returns the MAL ID.
+func (m Manga) GetMALID() TargetID {
+	return TargetID(m.IDMal)
+}
+
+func (m Manga) GetSourceID() int {
+	if m.isReverse {
+		return m.IDMal
+	}
+	return m.IDAnilist
+}
+
+func (m Manga) GetStatusString() string {
+	return string(m.Status)
+}
+
+func (m Manga) GetStringDiffWithTarget(t Target) string {
+	b, ok := t.(Manga)
+	if !ok {
+		return "Diff{undefined}"
+	}
+
+	return buildDiffString(
+		"Status", m.Status, b.Status,
+		"Score", m.Score, b.Score,
+		"Progress", m.Progress, b.Progress,
+		"ProgressVolumes", m.ProgressVolumes, b.ProgressVolumes,
+		"StartedAt", m.StartedAt, b.StartedAt,
+		"FinishedAt", m.FinishedAt, b.FinishedAt,
+	)
+}
+
+func (m Manga) SameProgressWithTarget(t Target) bool {
+	b, ok := t.(Manga)
+	if !ok {
+		return false
+	}
+
+	if m.Status != b.Status {
+		return false
+	}
+	if m.Score != b.Score {
+		return false
+	}
+	if m.Progress != b.Progress {
+		return false
+	}
+	if m.ProgressVolumes != b.ProgressVolumes {
+		return false
+	}
+	if !sameDates(m.StartedAt, b.StartedAt) {
+		return false
+	}
+	// Compare FinishedAt only when status is COMPLETED.
+	// Non-completed entries may have stale FinishedAt on AniList
+	// that MAL ignores — comparing them would cause infinite
+	// update loops since MAL never accepts the date.
+	if m.Status == MangaStatusCompleted && !sameDates(m.FinishedAt, b.FinishedAt) {
+		return false
+	}
+
+	return true
+}
+
+func (m Manga) SameTypeWithTarget(ctx context.Context, t Target) bool {
+	b, ok := t.(Manga)
+	if !ok {
+		return false
+	}
+
+	// Check if MAL IDs match (critical for reverse sync)
+	if m.IDMal > 0 && b.IDMal > 0 && m.IDMal == b.IDMal {
+		return true
+	}
+
+	// Check if AniList IDs match
+	if m.IDAnilist > 0 && b.IDAnilist > 0 && m.IDAnilist == b.IDAnilist {
+		return true
+	}
+
+	// Use the comprehensive title matching logic
+	if m.SameTitleWithTarget(ctx, t) {
+		return true
+	}
+
+	// Fallback: Check if chapters and volumes match (only if both are known)
+	if (m.Chapters > 0 || m.Volumes > 0) && m.Chapters == b.Chapters && m.Volumes == b.Volumes {
+		// NOTE: some mangas are joined in MAL in the same entry in Volumes, but it is separated in Anilist.
+		// Skip it for now.
+		return true
+	}
+
+	return false
+}
+
+func (m Manga) SameTitleWithTarget(ctx context.Context, t Target) bool {
+	b, ok := t.(Manga)
+	if !ok {
+		return false
+	}
+
+	return titleMatchingLevels(ctx, m.TitleEN, m.TitleJP, m.TitleRomaji, b.TitleEN, b.TitleJP, b.TitleRomaji)
+}
+
+func (m Manga) GetTitle() string {
+	if m.TitleEN != "" {
+		return m.TitleEN
+	}
+	if m.TitleJP != "" {
+		return m.TitleJP
+	}
+	return m.TitleRomaji
+}
+
+func (m Manga) String() string {
+	var sb strings.Builder
+	sb.WriteString("Manga{")
+	fmt.Fprintf(&sb, "IDAnilist: %d, ", m.IDAnilist)
+	fmt.Fprintf(&sb, "IDMal: %d, ", m.IDMal)
+	fmt.Fprintf(&sb, "TitleEN: %s, ", m.TitleEN)
+	fmt.Fprintf(&sb, "TitleJP: %s, ", m.TitleJP)
+	fmt.Fprintf(&sb, "Status: %s, ", m.Status)
+	fmt.Fprintf(&sb, "Score: %d, ", m.Score)
+	fmt.Fprintf(&sb, "Progress: %d, ", m.Progress)
+	fmt.Fprintf(&sb, "ProgressVolumes: %d, ", m.ProgressVolumes)
+	fmt.Fprintf(&sb, "Chapters: %d, ", m.Chapters)
+	fmt.Fprintf(&sb, "Volumes: %d, ", m.Volumes)
+	fmt.Fprintf(&sb, "StartedAt: %s, ", m.StartedAt)
+	fmt.Fprintf(&sb, "FinishedAt: %s", m.FinishedAt)
+	sb.WriteString("}")
+	return sb.String()
+}
+
+func (m Manga) GetUpdateOptions() []mal.UpdateMyMangaListStatusOption {
+	st, err := m.Status.GetMalStatus()
+	if err != nil {
+		log.Printf("Error getting MAL status: %v", err)
+		return nil
+	}
+
+	opts := []mal.UpdateMyMangaListStatusOption{
+		st,
+		mal.Score(m.Score),
+		mal.NumChaptersRead(m.Progress),
+		mal.NumVolumesRead(m.ProgressVolumes),
+	}
+
+	if m.StartedAt != nil {
+		opts = append(opts, mal.StartDate(*m.StartedAt))
+	} else {
+		opts = append(opts, mal.StartDate(time.Time{}))
+	}
+
+	if m.Status == MangaStatusCompleted && m.FinishedAt != nil {
+		opts = append(opts, mal.FinishDate(*m.FinishedAt))
+	} else {
+		opts = append(opts, mal.FinishDate(time.Time{}))
+	}
+
+	return opts
+}
+
+func newMangaFromMediaListEntry(
+	ctx context.Context, mediaList verniy.MediaList, scoreFormat verniy.ScoreFormat, reverse bool,
+) (Manga, error) {
+	if mediaList.Media == nil {
+		return Manga{}, errors.New("media is nil")
+	}
+
+	if mediaList.Status == nil {
+		return Manga{}, errors.New("status is nil")
+	}
+
+	if mediaList.Media.Title == nil {
+		return Manga{}, errors.New("title is nil")
+	}
+
+	var score int
+	if mediaList.Score != nil {
+		// Normalize AniList score to MAL format (0-10)
+		score = normalizeMangaScoreForMAL(ctx, *mediaList.Score, scoreFormat)
+	}
+
+	var progress int
+	if mediaList.Progress != nil {
+		progress = *mediaList.Progress
+	}
+
+	var progressVolumes int
+	if mediaList.ProgressVolumes != nil {
+		progressVolumes = *mediaList.ProgressVolumes
+	}
+
+	var titleEN string
+	if mediaList.Media.Title.English != nil {
+		titleEN = *mediaList.Media.Title.English
+	}
+
+	var titleJP string
+	if mediaList.Media.Title.Native != nil {
+		titleJP = *mediaList.Media.Title.Native
+	}
+
+	var idMal int
+	if mediaList.Media.IDMAL != nil {
+		idMal = *mediaList.Media.IDMAL
+	}
+
+	var romajiTitle string
+	if mediaList.Media.Title.Romaji != nil {
+		romajiTitle = *mediaList.Media.Title.Romaji
+	}
+
+	var chapters int
+	if mediaList.Media.Chapters != nil {
+		chapters = *mediaList.Media.Chapters
+	}
+
+	var volumes int
+	if mediaList.Media.Volumes != nil {
+		volumes = *mediaList.Media.Volumes
+	}
+
+	startedAt := convertFuzzyDateToTimeOrNow(mediaList.StartedAt)
+	finishedAt := convertFuzzyDateToTimeOrNow(mediaList.CompletedAt)
+
+	var isFavourite bool
+	if mediaList.Media.IsFavourite != nil {
+		isFavourite = *mediaList.Media.IsFavourite
+	}
+
+	return Manga{
+		IDAnilist:       mediaList.Media.ID,
+		IDMal:           idMal,
+		Progress:        progress,
+		ProgressVolumes: progressVolumes,
+		Score:           score,
+		Status:          mapAnilistMangaStatustToStatus(*mediaList.Status),
+		TitleEN:         titleEN,
+		TitleJP:         titleJP,
+		TitleRomaji:     romajiTitle,
+		Chapters:        chapters,
+		Volumes:         volumes,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		IsFavourite:     isFavourite,
+		isReverse:       reverse,
+	}, nil
+}
+
+// newMangaFromMalManga converts a MAL manga entry to the domain Manga type.
+// reverse=false: entry is a forward-sync target (MAL ID as target ID).
+// reverse=true: entry is a reverse-sync source (AniList ID as target ID).
+func newMangaFromMalManga(manga mal.Manga, reverse bool) (Manga, error) {
+	if manga.ID == 0 {
+		return Manga{}, errors.New("ID is nil")
+	}
+
+	startedAt := parseDateOrNow(manga.MyListStatus.StartDate)
+	finishedAt := parseDateOrNow(manga.MyListStatus.FinishDate)
+
+	titleEN := manga.Title
+	if manga.AlternativeTitles.En != "" {
+		titleEN = manga.AlternativeTitles.En
+	}
+
+	titleJP := manga.Title
+	if manga.AlternativeTitles.Ja != "" {
+		titleJP = manga.AlternativeTitles.Ja
+	}
+
+	// In reverse sync, IDAnilist=0 triggers name-based search in the strategy chain.
+	// In forward sync, IDAnilist=-1 indicates "unknown" (MAL entries as targets don't need it).
+	anilistID := -1
+	if reverse {
+		anilistID = 0
+	}
+
+	return Manga{
+		IDAnilist:       anilistID,
+		IDMal:           manga.ID,
+		Progress:        manga.MyListStatus.NumChaptersRead,
+		ProgressVolumes: manga.MyListStatus.NumVolumesRead,
+		Score:           manga.MyListStatus.Score, // MAL score is already 0-10 int
+		Status:          mapMalMangaStatusToStatus(manga.MyListStatus.Status),
+		TitleEN:         titleEN,
+		TitleJP:         titleJP,
+		TitleRomaji:     "",
+		Chapters:        manga.NumChapters,
+		Volumes:         manga.NumVolumes,
+		StartedAt:       startedAt,
+		FinishedAt:      finishedAt,
+		IsFavourite:     false, // MAL API v2 does not provide favorites
+		isReverse:       reverse,
+	}, nil
+}
+
+func mapMalMangaStatusToStatus(s mal.MangaStatus) MangaStatus {
+	switch s {
+	case mal.MangaStatusReading:
+		return MangaStatusReading
+	case mal.MangaStatusCompleted:
+		return MangaStatusCompleted
+	case mal.MangaStatusOnHold:
+		return MangaStatusOnHold
+	case mal.MangaStatusDropped:
+		return MangaStatusDropped
+	case mal.MangaStatusPlanToRead:
+		return MangaStatusPlanToRead
+	default:
+		return MangaStatusUnknown
+	}
+}
+
+func mapAnilistMangaStatustToStatus(s verniy.MediaListStatus) MangaStatus {
+	switch s {
+	case verniy.MediaListStatusCurrent:
+		return MangaStatusReading
+	case verniy.MediaListStatusCompleted:
+		return MangaStatusCompleted
+	case verniy.MediaListStatusPaused:
+		return MangaStatusOnHold
+	case verniy.MediaListStatusDropped:
+		return MangaStatusDropped
+	case verniy.MediaListStatusPlanning:
+		return MangaStatusPlanToRead
+	case verniy.MediaListStatusRepeating:
+		return MangaStatusReading // TODO: handle repeating correctly
+	default:
+		return MangaStatusUnknown
+	}
+}
+
+// newMangasFromMediaListGroups converts AniList media list groups to domain Manga list.
+// reverse=false: forward-sync sources; reverse=true: reverse-sync targets.
+func newMangasFromMediaListGroups(
+	ctx context.Context, groups []verniy.MediaListGroup, scoreFormat verniy.ScoreFormat, reverse bool,
+) []Manga {
+	res := make([]Manga, 0, len(groups))
+	for _, group := range groups {
+		for _, mediaList := range group.Entries {
+			r, err := newMangaFromMediaListEntry(ctx, mediaList, scoreFormat, reverse)
+			if err != nil {
+				log.Printf("Error creating manga from media list entry: %v", err)
+				continue
+			}
+
+			res = append(res, r)
+		}
+	}
+	return res
+}
+
+// newMangasFromMalUserMangas converts MAL user manga list to domain Manga list.
+// reverse=false: entries are forward-sync targets; reverse=true: reverse-sync sources.
+func newMangasFromMalUserMangas(mangas []mal.UserManga, reverse bool) []Manga {
+	res := make([]Manga, 0, len(mangas))
+	for _, manga := range mangas {
+		r, err := newMangaFromMalManga(manga.Manga, reverse)
+		if err != nil {
+			log.Printf("Error creating manga from mal user manga: %v", err)
+			continue
+		}
+
+		res = append(res, r)
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].GetStatusString() < res[j].GetStatusString()
+	})
+	return res
+}
+
+// newMangasFromMalMangas converts MAL manga search results to domain Manga list.
+// Always forward (reverse=false) — search results are never used as reverse-sync sources.
+func newMangasFromMalMangas(mangas []mal.Manga, reverse bool) []Manga {
+	res := make([]Manga, 0, len(mangas))
+	for _, manga := range mangas {
+		r, err := newMangaFromMalManga(manga, reverse)
+		if err != nil {
+			log.Printf("Error creating manga from mal manga: %v", err)
+			continue
+		}
+
+		res = append(res, r)
+	}
+	return res
+}
+
+func newTargetsFromMangas(mangas []Manga) []Target {
+	res := make([]Target, 0, len(mangas))
+	for _, manga := range mangas {
+		res = append(res, manga)
+	}
+	return res
+}
+
+func newSourcesFromMangas(mangas []Manga) []Source {
+	res := make([]Source, 0, len(mangas))
+	for _, manga := range mangas {
+		res = append(res, manga)
+	}
+	return res
+}
+
+// newMangasFromVerniyMedias converts AniList API search results to domain Manga list.
+// reverse=true: entries will be used as reverse-sync targets (AniList IDs as target IDs).
+func newMangasFromVerniyMedias(medias []verniy.Media, reverse bool) []Manga {
+	res := make([]Manga, 0, len(medias))
+	for _, media := range medias {
+		m, err := newMangaFromVerniyMedia(media, reverse)
+		if err != nil {
+			log.Printf("failed to convert verniy media to manga: %v", err)
+			continue
+		}
+		res = append(res, m)
+	}
+	return res
+}
+
+func newMangaFromVerniyMedia(media verniy.Media, reverse bool) (Manga, error) {
+	if media.ID == 0 {
+		return Manga{}, errors.New("ID is 0")
+	}
+
+	var titleEN string
+	if media.Title != nil && media.Title.English != nil {
+		titleEN = *media.Title.English
+	}
+
+	var titleJP string
+	if media.Title != nil && media.Title.Native != nil {
+		titleJP = *media.Title.Native
+	}
+
+	var romajiTitle string
+	if media.Title != nil && media.Title.Romaji != nil {
+		romajiTitle = *media.Title.Romaji
+	}
+
+	var chapters int
+	if media.Chapters != nil {
+		chapters = *media.Chapters
+	}
+
+	var volumes int
+	if media.Volumes != nil {
+		volumes = *media.Volumes
+	}
+
+	var idMal int
+	if media.IDMAL != nil {
+		idMal = *media.IDMAL
+	}
+
+	return Manga{
+		IDAnilist:       media.ID,
+		IDMal:           idMal,
+		Progress:        0,                  // Will be set from MAL source
+		ProgressVolumes: 0,                  // Will be set from MAL source
+		Score:           0,                  // Will be set from MAL source
+		Status:          MangaStatusUnknown, // Will be set from MAL source
+		TitleEN:         titleEN,
+		TitleJP:         titleJP,
+		TitleRomaji:     romajiTitle,
+		Chapters:        chapters,
+		Volumes:         volumes,
+		StartedAt:       nil,   // Will be set from MAL source
+		FinishedAt:      nil,   // Will be set from MAL source
+		IsFavourite:     false, // Verniy media from search doesn't contain user favorite status
+		isReverse:       reverse,
+	}, nil
+}

@@ -1,0 +1,39 @@
+name: Daily Anime List Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run sync
+        env:
+          ANILIST_TOKEN: ${{ secrets.ANILIST_TOKEN }}
+          MAL_ACCESS_TOKEN: ${{ secrets.MAL_ACCESS_TOKEN }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+          MAL_REFRESH_TOKEN: ${{ secrets.MAL_REFRESH_TOKEN }}
+          ANIMESCHEDULE_TOKEN: ${{ secrets.ANIMESCHEDULE_TOKEN }}
+          LOG_LEVEL: INFO
+          STATUS_PATH: status/latest.json
+          SYNC_DRY_RUN: "false"
+        run: python src/sync.py
+
+      - name: Upload status artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-status
+          path: status/latest.json
+          if-no-files-found: ignore
