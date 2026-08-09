@@ -45,12 +45,4 @@ jobs:
         run: go build -mod=vendor -v ./...
 
       - name: Test
-        run: go test -mod=vendor -v -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: Upload coverage to Codecov
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
-        with:
-          files: ./coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+        run: go test -mod=vendor -v ./...
