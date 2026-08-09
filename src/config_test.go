@@ -221,8 +221,8 @@ func TestGetConfigHelp_ReturnsValidString(t *testing.T) {
 	keyPhrases := []string{
 		"Configuration file not found",
 		"To fix this",
-		"Copy the example config",
-		"config.example.yaml",
+		"Create a config file",
+		"config.yaml",
 		"nano",
 	}
 

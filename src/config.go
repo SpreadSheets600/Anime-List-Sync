@@ -492,15 +492,13 @@ func getConfigHelp(configPath string) string {
 		colorCyan   = "\033[36m"
 	)
 
-	examplePath := "config.example.yaml"
-
 	return fmt.Sprintf(`
 %sConfiguration file not found or invalid!%s
 
 %sTo fix this:%s
 
-1. Copy the example config:
-   %scp %s %s%s
+1. Create a config file:
+   %stouch %s%s
 
 2. Edit the config file with your credentials:
    %snano config.yaml%s
@@ -512,7 +510,7 @@ func getConfigHelp(configPath string) string {
 
 `, colorBold+colorRed, colorReset,
 		colorBold+colorYellow, colorReset,
-		colorCyan, examplePath, configPath, colorReset,
+		colorCyan, configPath, colorReset,
 		colorCyan, colorReset,
 		colorBold+colorYellow, colorReset,
 		colorCyan, colorReset)

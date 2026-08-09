@@ -52,7 +52,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Build
-        run: go build -o anilist-mal-sync .
+        run: cd src && go build -o ../anilist-mal-sync .
 
       - name: Cache offline database
         uses: actions/cache@v4
