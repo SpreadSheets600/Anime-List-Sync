@@ -51,7 +51,7 @@ Full guide (incl. optional auto-refresh OAuth mode and troubleshooting):
 <!-- SYNC-STATS:START -->
 _Automatically updated by the anilist-mal-sync GitHub Actions workflow._
 
-**Last sync:** not run yet - trigger the sync workflow.
+**Last sync: FAILED** - check the Actions run log for details.
 <!-- SYNC-STATS:END -->
 
 ## Disclaimer
